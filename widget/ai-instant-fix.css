@@ -1,0 +1,197 @@
+/* === Fizi AI Instant Fix Widget — Universal === */
+#aif-root {
+  position: fixed;
+  bottom: 20px;
+  right: 20px;
+  z-index: 2147483647;
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  direction: ltr;
+}
+
+/* Toggle button */
+.aif-btn {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  background: #247b70;
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  font-size: 22px;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.18);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.2s, background 0.2s;
+}
+.aif-btn:hover { background: #1d665c; transform: scale(1.06); }
+.aif-btn.open { background: #dd4e1c; }
+
+/* Panel */
+.aif-panel {
+  position: fixed;
+  bottom: 82px;
+  right: 20px;
+  width: 380px;
+  max-height: 72vh;
+  background: #fff;
+  border-radius: 12px;
+  box-shadow: 0 8px 36px rgba(0,0,0,0.16);
+  display: none;
+  flex-direction: column;
+  overflow: hidden;
+  z-index: 2147483646;
+}
+.aif-panel.show { display: flex; }
+
+.aif-header {
+  background: #247b70;
+  color: #fff;
+  padding: 11px 16px;
+  font-weight: 600;
+  font-size: 14px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-shrink: 0;
+}
+.aif-header-close {
+  background: none; border: none; color: #fff;
+  cursor: pointer; font-size: 20px; line-height: 1; padding: 0 4px;
+}
+
+/* Tabs */
+.aif-tabs {
+  display: flex; gap: 4px; padding: 10px 14px 0; flex-shrink: 0;
+}
+.aif-tab {
+  flex: 1; padding: 7px 0;
+  border: 1px solid #ddd; background: #f8f9fa;
+  border-radius: 6px 6px 0 0; cursor: pointer;
+  font-size: 12px; text-align: center; border-bottom: none; color: #555;
+  transition: all 0.15s;
+}
+.aif-tab:hover { background: #e9ecef; color: #333; }
+.aif-tab.active { background: #fff; color: #247b70; font-weight: 600; border-color: #247b70; }
+
+/* New Fix tab body */
+.aif-body {
+  padding: 14px; display: flex; flex-direction: column; gap: 10px;
+  border-top: 2px solid #247b70;
+  overflow-y: auto;
+}
+.aif-textarea {
+  width: 100%; min-height: 85px; border: 1px solid #ddd;
+  border-radius: 8px; padding: 10px; font-size: 13px;
+  resize: vertical; box-sizing: border-box; font-family: inherit; line-height: 1.5;
+}
+.aif-textarea:focus { outline: none; border-color: #247b70; box-shadow: 0 0 0 2px rgba(36,123,112,0.15); }
+
+.aif-submit {
+  width: 100%; padding: 10px; background: #247b70; color: #fff;
+  border: none; border-radius: 8px; cursor: pointer;
+  font-size: 14px; font-weight: 600; transition: background 0.15s;
+}
+.aif-submit:hover { background: #1d665c; }
+.aif-submit:disabled { background: #999; cursor: not-allowed; }
+
+.aif-msg {
+  font-size: 12px; padding: 8px 10px; border-radius: 6px;
+  display: none; line-height: 1.4;
+}
+.aif-msg.ok    { display: block; background: #d4edda; color: #155724; border: 1px solid #c3e6cb; }
+.aif-msg.error { display: block; background: #f8d7da; color: #721c24; border: 1px solid #f5c6cb; }
+
+/* Tasks tab */
+.aif-tasks-wrap { display: none; }
+.aif-tasks-wrap.show { display: block; }
+
+.aif-tasks-head {
+  padding: 8px 14px; font-size: 12px; font-weight: 600; color: #666;
+  background: #f8f9fa; cursor: pointer; display: flex;
+  justify-content: space-between; user-select: none; border-bottom: 1px solid #eee;
+}
+.aif-tasks-head:hover { background: #e9ecef; }
+
+.aif-tasks-list {
+  list-style: none; margin: 0; padding: 0;
+  max-height: 280px; overflow-y: auto;
+}
+.aif-tasks-list.collapsed { display: none; }
+
+.aif-task {
+  padding: 10px 14px; border-bottom: 1px solid #f0f0f0; font-size: 12px;
+}
+.aif-task:last-child { border-bottom: none; }
+.aif-task-prompt { color: #333; margin-bottom: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.aif-task-meta { font-size: 11px; color: #999; }
+
+.aif-badge {
+  display: inline-block; padding: 2px 7px; border-radius: 10px;
+  font-size: 10px; font-weight: 600; text-transform: uppercase;
+}
+.aif-badge.accepted  { background: #fff3cd; color: #856404; }
+.aif-badge.ongoing   { background: #cce5ff; color: #004085; }
+.aif-badge.completed { background: #d4edda; color: #155724; }
+.aif-badge.rejected  { background: #f8d7da; color: #721c24; }
+.aif-badge.dangerous { background: #fce4e4; color: #b91c1c; font-weight: 700; }
+.aif-badge.complex   { background: #e0d4ff; color: #5b21b6; }
+.aif-badge.prompt    { background: #fff3cd; color: #856404; }
+
+/* Reply button */
+.aif-reply-btn {
+  background: none; border: 1px solid #247b70; color: #247b70;
+  padding: 2px 8px; border-radius: 10px; cursor: pointer;
+  font-size: 10px; margin-left: 6px;
+}
+.aif-reply-btn:hover { background: #247b70; color: #fff; }
+
+/* Reply task (indented) */
+.aif-reply-task { background: #fafafa; border-left: 3px solid #247b70; padding-left: 11px !important; }
+
+.aif-empty { padding: 24px; text-align: center; color: #aaa; font-size: 13px; }
+
+/* ── Settings tab ─────────────────────────────────── */
+.aif-label {
+  font-size: 12px; font-weight: 600; color: #555;
+  margin-bottom: -6px;
+}
+.aif-hint {
+  font-weight: 400; color: #999; font-size: 11px;
+}
+
+.aif-input {
+  width: 100%; padding: 8px 10px; border: 1px solid #ddd;
+  border-radius: 6px; font-size: 13px; box-sizing: border-box;
+  font-family: inherit; transition: border-color 0.15s;
+}
+.aif-input:focus { outline: none; border-color: #247b70; box-shadow: 0 0 0 2px rgba(36,123,112,0.15); }
+
+/* Password field with toggle */
+.aif-pw-wrap {
+  position: relative;
+}
+.aif-pw-wrap .aif-input {
+  padding-right: 38px;
+}
+.aif-pw-toggle {
+  position: absolute; right: 4px; top: 50%; transform: translateY(-50%);
+  background: none; border: none; cursor: pointer;
+  font-size: 16px; padding: 4px 8px; line-height: 1;
+  opacity: 0.5; transition: opacity 0.15s;
+}
+.aif-pw-toggle:hover { opacity: 1; }
+
+/* Settings buttons row */
+.aif-settings-btns {
+  display: flex; gap: 8px;
+}
+.aif-settings-btns .aif-submit {
+  flex: 1;
+}
+.aif-submit-secondary {
+  background: #6c757d !important;
+}
+.aif-submit-secondary:hover {
+  background: #5a6268 !important;
+}

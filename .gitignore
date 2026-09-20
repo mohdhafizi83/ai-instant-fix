@@ -1,0 +1,15 @@
+# Junk & secrets
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.log
+*.backup*
+.env
+.env.*
+node_modules/
+tasks.db
+*.db
+*.db-wal
+*.db-shm
+.env
