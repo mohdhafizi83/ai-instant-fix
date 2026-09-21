@@ -1,6 +1,6 @@
 """
 AI Instant Fix — API Server v2.0
-- Direct Hermes Agent invocation (not Telegram forward)
+- Pluggable AI executor dispatch (any CLI agent)
 - JWT authentication (optional)
 - Telegram completion notification
 """
@@ -55,15 +55,17 @@ def verify_webhook_signature():
 # ── Config (env vars) ─────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN', '')
 TELEGRAM_CHAT_ID   = os.environ.get('TELEGRAM_CHAT_ID', '')
-HERMES_PROFILE     = os.environ.get('HERMES_PROFILE', 'default')
+# Executor: any AI CLI agent (Hermes, Claude Code, Codex, custom script).
+# EXECUTOR_CMD is a shell template; {prompt_file} is replaced with a
+# temp file containing the task prompt. Empty = dispatch to worker queue.
+EXECUTOR_CMD     = os.environ.get('EXECUTOR_CMD', '')
+EXECUTOR_PROFILE = os.environ.get('EXECUTOR_PROFILE',
+                       os.environ.get('HERMES_PROFILE', 'default'))
 JWT_SECRET         = os.environ.get('JWT_SECRET', '')
 # Shared secret used to sign internal webhook calls (PHP plugin -> this server).
 WEBHOOK_SECRET     = os.environ.get('WEBHOOK_SECRET', '')
 API_URL            = os.environ.get('API_URL',
                        f"http://localhost:{os.environ.get('PORT', '5556')}")
-HERMES_BIN         = os.environ.get('HERMES_BIN', 'hermes')
-HERMES_ENV_FILE    = os.environ.get('HERMES_ENV_FILE',
-                       os.path.expanduser('~/.hermes/.env'))
 PHP_API_URL        = os.environ.get('PHP_API_URL', '')
 POWER_TOOL_URL     = os.environ.get('POWER_TOOL_URL', 'http://localhost:5557')
 POWER_TOOL_CLIENT  = os.environ.get('POWER_TOOL_CLIENT_ID', None)  # None → auto-resolve from domain
@@ -127,7 +129,7 @@ def resolve_client_by_domain(url):
                     print(f'[AIF] Resolved {domain} → client #{cid} ({c["name"]})', flush=True)
                     return cid
                 
-                # Also check by name pattern (e.g., 'pewarisan' → pewarisan.my)
+                # Also match by name pattern (e.g., client "acme" → acme.example.com)
                 client_name = (c.get('name') or '').lower()
                 if client_name and client_name in domain:
                     cid = c['id']
@@ -240,7 +242,7 @@ def jwt_required(f):
 def _auth_allows_mutation():
     """PUT /api/tasks/<id> may be called by a JWT holder OR a signed webhook.
 
-    The Hermes agent (running on this host) and the PHP plugin both report
+    The AI executor (running on this host) and the PHP plugin both report
     task status back. Either a valid Bearer JWT or a valid X-AIF-Signature
     over the raw request body is accepted.
     """
@@ -301,7 +303,7 @@ _MIN_PROMPT_LENGTH = 5
 
 
 def prefilter_task(prompt, url=''):
-    """Lightweight pre-filter to catch obviously bad tasks before spawning Hermes.
+    """Lightweight pre-filter to catch obviously bad tasks before dispatching to the executor.
 
     Liberal mode: only blocks the most egregious cases. The LLM-level
     Safety Rules in the ai-instant-fix skill handle nuanced decisions.
@@ -325,21 +327,19 @@ def prefilter_task(prompt, url=''):
     return True, None, None
 
 
-# ── Hermes Agent spawn ────────────────────────────────
+# ── Executor dispatch (pluggable AI agent) ────────────
 
-def spawn_hermes(task_id, user_id, prompt, url, path_files=None):
-    """Dispatch task to Worker Queue via Power Tool API instead of direct Hermes spawn."""
-
-    # Build a self-contained Hermes prompt
+def build_task_prompt(task_id, user_id, prompt, url, path_files=None):
+    """Build a self-contained executor prompt for one task."""
     parts = [
         f"AI Instant Fix task #{task_id}",
-        f"",
+        "",
         f"User: {user_id}",
         f"Page URL: {url}",
         f"Fix requested: {prompt}",
-        f"",
+        "",
         f"IMPORTANT: Restrict changes to this page ({url}) only unless stated otherwise.",
-        f"Do NOT modify files or functions unrelated to that page.",
+        "Do NOT modify files or functions unrelated to that page.",
     ]
     if path_files:
         parts.append(f"Relevant files (hint): {path_files}")
@@ -360,30 +360,72 @@ def spawn_hermes(task_id, user_id, prompt, url, path_files=None):
         "",
         "IMPORTANT: Do NOT mark the task complete until you have ACTUALLY made and verified the changes.",
     ]
+    return "\n".join(parts)
 
-    hermes_prompt = "\n".join(parts)
 
-    # Route to Worker Queue via Power Tool API instead of direct subprocess.Popen()
+def spawn_executor(task_id, user_id, prompt, url, path_files=None):
+    """Dispatch a task to the configured AI executor.
+
+    Two executor modes:
+    1. EXECUTOR_CMD set  → run locally as a shell template.
+       Placeholders: {prompt_file} (required), {task_id}, {user_id}, {url}.
+       Examples:
+         EXECUTOR_CMD="hermes chat --profile $EXECUTOR_PROFILE --query-file {prompt_file}"
+         EXECUTOR_CMD="claude -p \"$(cat {prompt_file})\""
+         EXECUTOR_CMD="/opt/my-agent/run.sh {prompt_file}"
+    2. EXECUTOR_CMD empty → dispatch to a worker queue via POWER_TOOL_URL
+       (any worker system that accepts POST /api/tasks).
+    """
+    task_prompt = build_task_prompt(task_id, user_id, prompt, url, path_files)
+
+    if EXECUTOR_CMD:
+        # Mode 1: local CLI executor via shell template.
+        import subprocess, tempfile
+        fd, prompt_file = tempfile.mkstemp(prefix=f"aif-{task_id}-", suffix=".txt")
+        with os.fdopen(fd, "w") as f:
+            f.write(task_prompt)
+        try:
+            cmd = EXECUTOR_CMD.format(
+                prompt_file=prompt_file, task_id=task_id,
+                user_id=user_id, url=url,
+            )
+        except (KeyError, IndexError) as e:
+            os.unlink(prompt_file)
+            print(f"[AIF] Invalid EXECUTOR_CMD template ({e})", flush=True)
+            return False
+        print(f"[AIF] Executing task #{task_id} via EXECUTOR_CMD (profile={EXECUTOR_PROFILE})", flush=True)
+        try:
+            subprocess.Popen(
+                cmd, shell=True,
+                stdout=open(os.devnull, "w"), stderr=subprocess.STDOUT,
+                env={**os.environ, "AIF_TASK_ID": str(task_id)},
+            )
+            return True
+        except Exception as e:
+            print(f"[AIF] EXECUTOR_CMD failed to start for task #{task_id}: {e}", flush=True)
+            return False
+
+    # Mode 2: worker queue dispatch (neutral HTTP contract).
     power_tool_url = os.environ.get('POWER_TOOL_URL', 'http://localhost:5557')
     payload = {
         'client_id': int(os.environ.get('POWER_TOOL_CLIENT_ID', '1')),
         'user_id': f'aif:{user_id}',
-        'prompt': hermes_prompt,
+        'prompt': task_prompt,
         'url': url,
         'path_files': ';'.join(path_files) if path_files else None,
         'priority': 2,  # Urgent
     }
 
-    print(f'[AIF] Dispatching task #{task_id} to Worker Queue (profile={HERMES_PROFILE})', flush=True)
+    print(f'[AIF] Dispatching task #{task_id} to Worker Queue (profile={EXECUTOR_PROFILE})', flush=True)
     try:
         import requests as req
         resp = req.post(f'{power_tool_url}/api/tasks', json=payload, timeout=10)
         if resp.status_code == 201:
             data = resp.json()
-            print(f'[AIF] Task #{task_id} queued → Power Tool task #{data.get("task_id")} ({data.get("status")})', flush=True)
+            print(f'[AIF] Task #{task_id} queued → worker task #{data.get("task_id")} ({data.get("status")})', flush=True)
             return True
         else:
-            print(f'[AIF] Power Tool returned {resp.status_code}: {resp.text[:200]}', flush=True)
+            print(f'[AIF] Worker queue returned {resp.status_code}: {resp.text[:200]}', flush=True)
             return False
     except Exception as e:
         print(f'[AIF] Failed to dispatch task #{task_id} to Worker Queue: {e}', flush=True)
@@ -438,8 +480,8 @@ def _process_task_request(user_id, prompt, url, path_files=None, remote_id=None)
         f"\U0001f464 {user_id}"
     )
 
-    # Fire-and-forget: spawn Hermes Agent
-    ok = spawn_hermes(task_id, user_id, prompt, url, path_files)
+    # Fire-and-forget: dispatch to the configured AI executor
+    ok = spawn_executor(task_id, user_id, prompt, url, path_files)
     if ok:
         db.update_task_status(task_id, 'task on going')
         return {'task_id': task_id, 'status': 'task on going'}, 201
@@ -447,7 +489,7 @@ def _process_task_request(user_id, prompt, url, path_files=None, remote_id=None)
         return {
             'task_id': task_id,
             'status': 'task accepted',
-            'warning': 'Hermes agent failed to start; task saved',
+            'warning': 'Executor failed to start; task saved',
         }, 201
 
 
@@ -584,7 +626,7 @@ def _sync_to_wordpress(task_id, status):
 def settings():
     return jsonify({
         'api_url':        API_URL,
-        'hermes_profile': HERMES_PROFILE,
+        'executor_profile': EXECUTOR_PROFILE,
         'auth_required':  bool(JWT_SECRET),
     })
 
@@ -622,7 +664,7 @@ def health():
 @app.route('/api/webhook/task', methods=['POST'])
 @rate_limit(30, 60)
 def webhook_task():
-    """Called by PHP plugin to trigger Hermes on local server.
+    """Called by PHP plugin to trigger the AI executor on this server.
 
     Requires a valid HMAC signature (X-AIF-Signature) computed over the
     raw request body with WEBHOOK_SECRET. Fails closed if WEBHOOK_SECRET
@@ -718,9 +760,9 @@ def poll_tasks():
                 f"\U0001f310 {url}\n"
                 f"\U0001f464 {uid}"
             )
-            # Spawn Hermes
-            ok = spawn_hermes(tid, uid, prompt, url, t.get('path_files'))
-            results.append({'task_id': tid, 'hermes_spawned': ok})
+            # Dispatch to executor
+            ok = spawn_executor(tid, uid, prompt, url, t.get('path_files'))
+            results.append({'task_id': tid, 'executor_dispatched': ok})
         return jsonify({'polled': len(results), 'results': results})
     except Exception as e:
         print(f'[AIF] Poll failed: {e}', flush=True)
@@ -734,7 +776,7 @@ if __name__ == '__main__':
     db.init_db()
     port = int(os.environ.get('PORT', 5556))
     print(f'AI Instant Fix API v2.0  http://0.0.0.0:{port}')
-    print(f'  Hermes profile : {HERMES_PROFILE}')
+    print(f'  Executor       : {EXECUTOR_CMD or "worker queue"} (profile={EXECUTOR_PROFILE})')
     print(f'  JWT auth       : {"ON" if JWT_SECRET else "OFF"}')
     print(f'  Telegram notify: {"ON" if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID else "OFF"}')
     app.run(host='0.0.0.0', port=port, debug=False)

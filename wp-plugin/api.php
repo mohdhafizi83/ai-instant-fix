@@ -18,9 +18,11 @@ define('DB_PASS', getenv('DB_PASS') ?: '');
 define('DB_PREFIX', getenv('DB_PREFIX') ?: 'wp_');
 
 // ── Integration config (from environment) ──────────
-define('AIF_HERMES_WEBHOOK', getenv('AIF_HERMES_WEBHOOK') ?: '');
+// Executor webhook URL (the AI agent server that processes tasks).
+// AIF_HERMES_WEBHOOK is accepted as a legacy alias.
+define('AIF_EXECUTOR_WEBHOOK', getenv('AIF_EXECUTOR_WEBHOOK') ?: getenv('AIF_HERMES_WEBHOOK') ?: '');
 define('AIF_TELEGRAM_CHAT',  getenv('AIF_TELEGRAM_CHAT') ?: '');
-// Shared secret — must match WEBHOOK_SECRET on the Hermes server.
+// Shared secret — must match WEBHOOK_SECRET on the executor server.
 define('AIF_WEBHOOK_SECRET', getenv('AIF_WEBHOOK_SECRET') ?: '');
 $AIF_TELEGRAM_TOKEN = getenv('TELEGRAM_BOT_TOKEN') ?: '';
 
@@ -111,8 +113,8 @@ function aif_get_input() {
     return $_GET;
 }
 
-function aif_trigger_hermes($task_id, $user_id, $prompt, $url, $path_files = null) {
-    if (!AIF_HERMES_WEBHOOK || !AIF_WEBHOOK_SECRET) return false;
+function aif_trigger_executor($task_id, $user_id, $prompt, $url, $path_files = null) {
+    if (!AIF_EXECUTOR_WEBHOOK || !AIF_WEBHOOK_SECRET) return false;
 
     $payload = json_encode([
         'user_id'        => $user_id,
@@ -123,7 +125,7 @@ function aif_trigger_hermes($task_id, $user_id, $prompt, $url, $path_files = nul
     ]);
     $signature = hash_hmac('sha256', $payload, AIF_WEBHOOK_SECRET);
 
-    $ch = curl_init(AIF_HERMES_WEBHOOK);
+    $ch = curl_init(AIF_EXECUTOR_WEBHOOK);
     curl_setopt_array($ch, [
         CURLOPT_POST           => true,
         CURLOPT_POSTFIELDS     => $payload,
@@ -193,12 +195,12 @@ switch ($action) {
         $task_id = $stmt->insert_id;
         $stmt->close();
 
-        $triggered = aif_trigger_hermes($task_id, $user_id, $prompt, $url, $path_files);
+        $triggered = aif_trigger_executor($task_id, $user_id, $prompt, $url, $path_files);
 
         aif_json([
             'task_id' => $task_id,
             'status'  => $triggered ? 'task on going' : 'task accepted',
-            'warning' => $triggered ? null : 'Hermes server unreachable',
+            'warning' => $triggered ? null : 'Executor server unreachable',
         ], 201);
         break;
 

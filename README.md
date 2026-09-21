@@ -6,11 +6,12 @@ Browser widget for submitting AI-powered instant fixes. Write what you want chan
 
 1. **Admin clicks widget** on any webpage → types a fix request (e.g. "Change the Save button to blue")
 2. **Widget sends** `{prompt, url, user_id}` to the API server
-3. **API server stores** in SQLite + forwards to Telegram Hermes Agent
-4. **Hermes Agent** resolves file paths, edits files, verifies, marks complete
-5. **Widget polls** task list → shows updated status (📋 accepted → ⏳ ongoing → ✅ completed)
+3. **API server stores** the task and dispatches it to your configured **AI executor** (any CLI agent: Hermes, Claude Code, Codex, or a custom script)
+4. **The executor** resolves file paths, edits files, verifies, marks the task complete via a signed callback
+5. **Widget polls** the task list → shows updated status (📋 accepted → ⏳ ongoing → ✅ completed)
 
 No framework adapters needed. The AI agent discovers files autonomously.
+The control server is **executor-agnostic** — see `EXECUTOR_CMD` below.
 
 ## Quickstart
 
@@ -21,9 +22,12 @@ cd server
 python3 -m venv venv && source venv/bin/activate
 pip install flask flask-cors requests
 
-# Get bot token from Hermes config
+# Get bot token from your Telegram bot (optional notifications)
 export TELEGRAM_BOT_TOKEN=***
 export TELEGRAM_CHAT_ID=your_chat_id
+
+# Choose your AI executor (see "Choosing an AI Executor" below)
+export EXECUTOR_CMD='hermes chat --query-file {prompt_file}'
 
 python app.py  # runs on http://0.0.0.0:5555
 ```
@@ -47,14 +51,15 @@ Copy `wp-plugin/` to `/wp-content/plugins/ai-instant-fix/`, activate.
 Configure API URL in Settings → AI Instant Fix.
 Widget auto-injects for administrator users.
 
-### 4. Hermes Agent
+### 4. AI Executor
 
-Load the `ai-instant-fix` skill. Tasks forwarded to Telegram will be auto-processed.
+Configure `EXECUTOR_CMD` (or a worker queue) so the server has something
+to dispatch tasks to — see "Choosing an AI Executor" below.
 
 ## Architecture
 
 ```
-Browser Widget (JS) → API Server (Flask + SQLite) → Telegram → Hermes Agent → File Edit → Done
+Browser Widget (JS) → API Server (Flask + SQLite) → Executor (any AI CLI agent) → File Edit → Signed callback → Done
 ```
 
 ## API Endpoints
@@ -96,6 +101,51 @@ ai-instant-fix/
         └── ai-instant-fix.css
 ```
 
+## Choosing an AI Executor
+
+The control server does not assume any particular AI tool. When a task
+arrives, it dispatches to **one** of:
+
+### Mode 1 — Local CLI executor (`EXECUTOR_CMD`)
+
+A shell template run on the control server. The task prompt is written
+to a temp file; placeholders available: `{prompt_file}` (required),
+`{task_id}`, `{user_id}`, `{url}`.
+
+```bash
+# Hermes
+EXECUTOR_CMD='hermes chat --query-file {prompt_file}'
+
+# Claude Code
+EXECUTOR_CMD='claude -p "$(cat {prompt_file})"'
+
+# Codex CLI
+EXECUTOR_CMD='codex exec "$(cat {prompt_file})"'
+
+# Your own script — receives the prompt file path as $1
+EXECUTOR_CMD='/opt/my-agent/run.sh {prompt_file}'
+```
+
+The executor must finish the work and call back
+`PUT /api/tasks/{id}` with an `X-AIF-Signature` HMAC header (the exact
+callback command is included in the generated prompt file).
+
+### Mode 2 — Worker queue (default when `EXECUTOR_CMD` is empty)
+
+Tasks are POSTed to `POWER_TOOL_URL/api/tasks` with a neutral JSON
+contract (`client_id`, `user_id`, `prompt`, `url`, `priority`). Any
+worker system that accepts this shape can consume the queue — including
+Hermes-based workers, CI runners, or custom dispatchers.
+
+### Which mode?
+
+| | Mode 1 (CLI) | Mode 2 (queue) |
+|---|---|---|
+| Setup | one env var | a worker service accepting POST |
+| Concurrency | one process per task | queue-managed |
+| Remote workers | no (local box only) | yes |
+| Best for | single machine, quick start | multi-worker / production |
+
 ## Deployment Topologies
 
 The system is topology-agnostic: every inter-component URL is an environment
@@ -112,7 +162,7 @@ Browser ──▶ [FRONT-END: shared hosting]
                     (no outbound call needed)
 
 [BACKEND: your own server / PC]  (must run 24/7)
-  Flask API (:5556) + Hermes agent (executor)
+  Flask API (:5556) + AI executor (any CLI agent)
       │
       ├─ every 30s: GET /api/poll  ──▶ pulls pending tasks from front-end DB
       ├─ executes the fix locally
@@ -127,7 +177,7 @@ Front-end env (shared hosting):
 ```
 DB_HOST / DB_NAME / DB_USER / DB_PASS     # MySQL with the task table
 AIF_ALLOWED_ORIGIN=https://your-site.com  # CORS
-# AIF_HERMES_WEBHOOK / AIF_WEBHOOK_SECRET optional here —
+# AIF_EXECUTOR_WEBHOOK / AIF_WEBHOOK_SECRET optional here —
 # in split mode the backend pushes status via PHP_API_URL instead
 ```
 
@@ -136,7 +186,7 @@ Backend env (your server):
 PHP_API_URL=https://your-site.com/wp-content/plugins/ai-instant-fix/api.php
 JWT_SECRET=*** rand -hex 32)
 WEBHOOK_SECRET=*** rand -hex 32)   # shared with whoever calls /api/webhook/task
-HERMES_BIN=hermes
+EXECUTOR_CMD='hermes chat --query-file {prompt_file}'
 ```
 Plus a 30s cron/systemd-timer on the backend:
 `curl -s --max-time 15 http://localhost:5556/api/poll`
@@ -157,9 +207,9 @@ server), systemd services, and persistent ports.
 ```
 Browser ──▶ [VPS]
   WP front-end (api.php) ──direct POST──▶ Flask API (:5556)  [127.0.0.1]
-  (same box)        AIF_HERMES_WEBHOOK=http://127.0.0.1:5556/api/webhook/task
+  (same box)        AIF_EXECUTOR_WEBHOOK=http://127.0.0.1:5556/api/webhook/task
                     AIF_WEBHOOK_SECRET=*** shared secret>
-  Flask + Hermes agent executes locally, updates the same DB.
+  Flask + AI executor runs locally, updates the same DB.
   Polling disabled (no ai-fix-poller timer needed).
 ```
 
@@ -167,7 +217,7 @@ Env on the single box:
 ```
 # front-end (wp-plugin/api.php)
 DB_HOST=127.0.0.1  DB_NAME=wordpress  DB_USER=wp  DB_PASS=***
-AIF_HERMES_WEBHOOK=http://127.0.0.1:5556/api/webhook/task
+AIF_EXECUTOR_WEBHOOK=http://127.0.0.1:5556/api/webhook/task
 AIF_WEBHOOK_SECRET=*** rand -hex 32)
 
 # backend (Flask)
@@ -194,7 +244,7 @@ The webhook hop is a local HTTP call — instant, no timer, no polling lag.
 This project is hardened for public/production use:
 
 - **JWT authentication** — all task endpoints require a Bearer token when `JWT_SECRET` is set
-- **Webhook HMAC signatures** — PHP→Hermes calls are signed with `X-AIF-Signature` (SHA-256 HMAC over the raw body); the webhook fails closed if no secret is configured
+- **Webhook HMAC signatures** — PHP→executor calls are signed with `X-AIF-Signature` (SHA-256 HMAC over the raw body); the webhook fails closed if no secret is configured
 - **Rate limiting** — per-IP sliding windows on every endpoint (login: 5/5min, create: 30/min, reads: 120/min)
 - **Constant-time comparisons** — `hmac.compare_digest` / `hash_equals` for all secret checks
 - **Pre-filter guard** — destructive prompts (SQL DROP/TRUNCATE, `rm -rf`, fork bombs) are blocked before reaching the agent

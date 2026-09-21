@@ -5,7 +5,7 @@
  * No WordPress dependency. Uses file_get_contents for forwarding.
  * 
  * The widget calls this file on same server (no CORS).
- * This file forwards to the local Hermes server (e.g. via Tailscale).
+ * This file forwards to the local AI executor server (e.g. via Tailscale).
  */
 
 // ── Config ─────────────────────────────────────────
@@ -82,7 +82,7 @@ if (isset($http_response_header)) {
 http_response_code($status_code ?: 502);
 
 if ($response === false) {
-    echo json_encode(['error' => 'Backend unreachable. Ensure Hermes server is running.']);
+    echo json_encode(['error' => 'Backend unreachable. Ensure the executor server is running.']);
 } else {
     echo $response;
 }

@@ -69,9 +69,9 @@ function fizi_aif_api() {
         echo json_encode(['status'=>'ok','server'=>'fizi-v7']); exit;
     }
 
-// ── Forward task to Hermes server ───────────────────
-function aif_forward_to_hermes($task_id, $uid, $prompt, $url, $path_files = null) {
-    $webhook = getenv('AIF_HERMES_WEBHOOK') ?: '';
+// ── Forward task to the executor server ─────────────
+function aif_forward_to_executor($task_id, $uid, $prompt, $url, $path_files = null) {
+    $webhook = getenv('AIF_EXECUTOR_WEBHOOK') ?: getenv('AIF_HERMES_WEBHOOK') ?: '';
     $secret  = getenv('AIF_WEBHOOK_SECRET') ?: '';
     if (!$webhook || !$secret) return false; // fail closed
 
@@ -115,14 +115,14 @@ function aif_forward_to_hermes($task_id, $uid, $prompt, $url, $path_files = null
         ));
         $new_id = $wpdb->insert_id;
 
-        // Forward to Hermes server to spawn agent
-        $forwarded = aif_forward_to_hermes($new_id, $uid, $p, $url, $in['path_files'] ?? null);
+        // Forward to the executor server to run the AI agent
+        $forwarded = aif_forward_to_executor($new_id, $uid, $p, $url, $in['path_files'] ?? null);
 
         echo json_encode([
             'task_id'   => $new_id,
             'status'    => $forwarded ? 'task on going' : 'task accepted',
             'parent_id' => $parent,
-            'warning'   => $forwarded ? null : 'Hermes server unreachable',
+            'warning'   => $forwarded ? null : 'Executor server unreachable',
         ]);
         exit;
     }
