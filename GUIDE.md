@@ -1,101 +1,114 @@
 # AI Instant Fix — Deployment Guide
 
-Quick guide for deploying AI Instant Fix on any web application.
+Quick guide for deploying AI Instant Fix with any web application.
 
-## Part 1: Deploy API Server
+> See also `README.md` for the feature overview, "Choosing an AI Executor",
+> and "Deployment Topologies". This guide covers hands-on steps.
+
+## Part 1: Deploy the API Server
 
 ```bash
 cd server
 python3 -m venv venv && source venv/bin/activate
-pip install flask flask-cors requests
+pip install -r requirements.txt
 
-# Set env vars
-export TELEGRAM_BOT_TOKEN="your_bot_token"
+# Required secrets (generate strong values):
+#   openssl rand -hex 32
+export JWT_SECRET="***"        # enables JWT auth on /api/*
+export WEBHOOK_SECRET="***"    # HMAC for /api/webhook/task
+export ADMIN_PASSWORD="***"    # enables POST /api/auth/login
+
+# Recommended production settings:
+export AIF_ALLOWED_ORIGIN="https://your-site.com"   # comma-separated CORS allowlist
+export PORT=5556
+
+# Optional: Telegram completion notifications
+export TELEGRAM_BOT_TOKEN="***"
 export TELEGRAM_CHAT_ID="your_chat_id"
-export PORT=5555
+
+# Optional: AI executor (see README "Choosing an AI Executor")
+export EXECUTOR_CMD='hermes chat --query-file {prompt_file}'
 
 python app.py
 ```
 
-For production: use systemd, supervisor, or Docker. Add nginx reverse proxy + HTTPS.
+For production: run behind a reverse proxy (nginx/Caddy) with HTTPS, and use
+systemd/supervisor/Docker for process management.
 
-## Part 2: Inject Widget
+### Getting a token
 
-The widget is a single JS file with zero dependencies. Inject it via:
+```bash
+curl -X POST http://localhost:5556/api/auth/login \
+  -H "Content-Type: application/json" \
+  -d '{"password":"***"}'
+# -> {"token": "***"}   (use as: Authorization: Bearer <token>)
+```
+
+If `JWT_SECRET` is unset, auth is disabled (local development only).
+
+## Part 2: Inject the Widget
+
+The widget (`widget/ai-instant-fix.js`) is a single zero-dependency file that
+injects its own styles. The API server also serves it at `/widget/ai-instant-fix.js`.
 
 ### Method A: Script tag (any framework)
 
 ```html
-<script src="/path/to/ai-instant-fix.js"
-  data-aif-api="https://your-api-server:5555"
-  data-aif-user-id="{{ current_user.email }}">
+<script src="https://your-api-server:5556/widget/ai-instant-fix.js"
+  data-aif-api="https://your-api-server:5556"
+  data-aif-user-id="{{ current_user.email }}"
+  data-aif-token="{{ aif_jwt_token }}">
 </script>
 ```
+
+Attributes: `data-aif-api` (required), `data-aif-user-id`, `data-aif-token`
+(optional JWT), `data-aif-theme` (accent color, default `#247b70`).
 
 ### Method B: Framework-specific
 
-**WordPress**: Install the plugin from `wp-plugin/`. Auto-injects for admins.
+Ready-made wrappers live in `clients/`:
 
-**Laravel**: Add to base layout:
-```blade
-@if(auth()->check() && auth()->user()->isAdmin())
-<script src="{{ asset('js/ai-instant-fix.js') }}"
-  data-aif-api="{{ env('AIF_API_URL') }}"
-  data-aif-user-id="{{ auth()->user()->email }}">
-</script>
-@endif
-```
-
-**Rails**: Add to `app/views/layouts/application.html.erb`:
-```erb
-<% if current_user&.admin? %>
-  <%= javascript_include_tag 'ai-instant-fix.js',
-        'data-aif-api': ENV['AIF_API_URL'],
-        'data-aif-user-id': current_user.email %>
-<% end %>
-```
-
-**Django**: Add to base template:
-```html
-{% if user.is_staff %}
-<script src="{% static 'js/ai-instant-fix.js' %}"
-  data-aif-api="{{ AIF_API_URL }}"
-  data-aif-user-id="{{ user.username }}">
-</script>
-{% endif %}
-```
-
-**React/Next.js**: Create a component:
+**React / Next.js** — `clients/react/AiInstantFix.jsx`
 ```jsx
-'use client';
-import Script from 'next/script';
+import { AiInstantFix } from './AiInstantFix';
 
-export function AiInstantFix({ userId, apiBase }) {
-  return (
-    <Script src="/js/ai-instant-fix.js"
-      data-aif-api={apiBase}
-      data-aif-user-id={userId}
-      strategy="afterInteractive"
-    />
-  );
-}
+<AiInstantFix api="https://fix.example.com" userId={user.email} token={jwt} />
+```
+A headless hook (`useAiInstantFix`) is included for building custom UIs.
+
+**Vue 3 / Nuxt** — `clients/vue/AiInstantFix.vue`
+```vue
+<AiInstantFix api="https://fix.example.com" user-id="admin" :token="jwt" />
 ```
 
-## Part 3: Configure Hermes Agent
+**Laravel** — `clients/laravel/AiInstantFixController.php`
+Same-origin proxy: the browser talks to YOUR domain; Laravel forwards to the
+AI Fix server with the token server-side. Copy the controller, add the three
+routes shown in its header comment, set `AIF_SERVER` + `AIF_TOKEN` in `.env`.
 
-Load the `ai-instant-fix` skill. Set environment variable:
-```bash
-export API_SERVER=http://your-api:5555
+**Express / Node** — `clients/express/ai-fix-router.js`
+```js
+const { aiFixRouter } = require('./ai-fix-router');
+app.use('/ai-fix', aiFixRouter());   // env: AIF_SERVER, AIF_TOKEN
 ```
 
-Hermes will:
-1. Receive task via Telegram
-2. Resolve file paths using `search_files` and `grep`
-3. Edit files via the terminal tool
-4. Update task status back to API
-5. Reply on Telegram
+**WordPress** — install the plugin from `wp-plugin/`. Auto-injects for admins.
 
-The agent resolves files autonomously — no per-framework adapter code needed.
+**Rails / Django / anything else** — the script-tag method (A) works everywhere;
+just render the widget URL and user id into your base layout.
+
+## Part 3: Wire the AI Executor
+
+The server never assumes a particular AI tool. Two modes (full details in
+README "Choosing an AI Executor"):
+
+- **Mode 1 — local CLI**: set `EXECUTOR_CMD` with a `{prompt_file}` template.
+  Works with Hermes, Claude Code, Codex, or any script.
+- **Mode 2 — worker queue**: leave `EXECUTOR_CMD` empty; a worker polls
+  `POWER_TOOL_URL` and claims tasks via the JSON contract.
+
+The executor processes the prompt and reports back via
+`PUT /api/tasks/:id` (JWT or `X-AIF-Signature` HMAC).
 
 ## Part 4: Customize
 
@@ -105,40 +118,47 @@ The agent resolves files autonomously — no per-framework adapter code needed.
 ```
 
 ### Widget position
-Override CSS: `#aif-root { bottom: 100px; left: 20px; right: auto; }`
+Override CSS: `#aif-root .aif-btn { bottom: 100px; left: 20px; right: auto; }`
 
-### Authentication
-For production, add a JWT/HMAC middleware to the Flask API:
-```python
-# In app.py, add a before_request hook
-@app.before_request
-def check_auth():
-    if request.path == '/health':
-        return
-    token = request.headers.get('X-AIF-Token')
-    if not verify_token(token):
-        return jsonify({'error': 'unauthorized'}), 401
-```
+### Reply threads
+The widget automatically threads follow-up replies (`parent_id`) under
+completed/rejected tasks, scoped per page (`page_url`).
 
 ## Quick Test
 
 ```bash
-# Start API
-cd server && python app.py &
+# Health
+curl http://localhost:5556/health
 
-# Create task
-curl -X POST http://localhost:5555/api/tasks \
+# Login (if ADMIN_PASSWORD set)
+TOKEN=*** -s -X POST http://localhost:5556/api/auth/login \
   -H "Content-Type: application/json" \
+  -d '{"password":"***"}' | python3 -c 'import sys,json;print(json.load(sys.stdin)["token"])')
+
+# Create a task
+curl -X POST http://localhost:5556/api/tasks \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{"user_id":"test","prompt":"Change header color","url":"https://example.com"}'
 
-# List tasks
-curl http://localhost:5555/api/tasks?user_id=test
-
-# Forward to Telegram
-curl -X POST http://localhost:5555/api/tasks/1/forward
+# List tasks for a page
+curl -H "Authorization: Bearer $TOKEN" \
+  "http://localhost:5556/api/tasks?page_url=https://example.com"
 
 # Mark done
-curl -X PUT http://localhost:5555/api/tasks/1 \
+curl -X PUT http://localhost:5556/api/tasks/1 \
   -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $TOKEN" \
   -d '{"status":"task completed"}'
 ```
+
+## Troubleshooting
+
+| Symptom | Cause / Fix |
+|---|---|
+| `401 Missing or invalid Authorization header` | Server has `JWT_SECRET` set — pass a Bearer token (login first) |
+| `401 Auth not configured` on login | `ADMIN_PASSWORD` or `JWT_SECRET` unset |
+| `429 rate limit exceeded` | Too many requests per IP — wait for the window |
+| CORS errors in browser console | Set `AIF_ALLOWED_ORIGIN` to your site's exact origin |
+| Widget shows "Auth required — set a token in Settings" | Pass `data-aif-token` or use the proxy pattern (Laravel/Express) |
+| Task stuck in "task accepted" | Executor not configured or failed to start — check server logs |

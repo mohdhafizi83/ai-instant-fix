@@ -29,7 +29,7 @@ export TELEGRAM_CHAT_ID=your_chat_id
 # Choose your AI executor (see "Choosing an AI Executor" below)
 export EXECUTOR_CMD='hermes chat --query-file {prompt_file}'
 
-python app.py  # runs on http://0.0.0.0:5555
+python app.py  # runs on http://0.0.0.0:5556 (override with PORT)
 ```
 
 ### 2. Inject Widget
@@ -111,14 +111,17 @@ Browser Widget (JS) → API Server (Flask + SQLite) → Executor (any AI CLI age
 
 ## API Endpoints
 
-| Method | Path | Purpose |
-|--------|------|---------|
-| POST | /api/tasks | Create new task |
-| GET | /api/tasks?user_id=X | List tasks |
-| GET | /api/tasks/:id | Get single task |
-| PUT | /api/tasks/:id | Update status |
-| POST | /api/tasks/:id/forward | Forward to Telegram |
-| GET | /health | Health check |
+| Method | Path | Auth | Purpose |
+|--------|------|------|---------|
+| POST | `/api/tasks` | JWT | Create task (`user_id, prompt, url, page_url?, parent_id?`) |
+| GET | `/api/tasks?user_id=X&page_url=Y&status=Z&limit=N` | JWT | List tasks + status counts |
+| GET | `/api/tasks/:id` | JWT | Get task + `replies[]` (reply threads) |
+| PUT | `/api/tasks/:id` | JWT or HMAC | Update status (`{status}`) |
+| POST | `/api/auth/login` | password | Get JWT (`{password}` → `{token}`) |
+| POST | `/api/webhook/task` | HMAC `X-AIF-Signature` | PHP plugin → executor trigger |
+| GET | `/api/poll` | JWT | Poll PHP side for pending tasks (split topology) |
+| GET | `/widget/ai-instant-fix.js` | none | Serve the universal widget |
+| GET | `/health` | none | Health check |
 
 ## Task Status Lifecycle
 
