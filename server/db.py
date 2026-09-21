@@ -11,6 +11,16 @@ def get_db():
     return conn
 
 
+def _migrate(conn):
+    """Add columns introduced after the initial schema (idempotent)."""
+    cols = [r['name'] for r in conn.execute("PRAGMA table_info(ai_instant_task)")]
+    if 'page_url' not in cols:
+        conn.execute("ALTER TABLE ai_instant_task ADD COLUMN page_url TEXT")
+    if 'parent_id' not in cols:
+        conn.execute("ALTER TABLE ai_instant_task ADD COLUMN parent_id INTEGER DEFAULT NULL")
+    conn.commit()
+
+
 def init_db():
     conn = get_db()
     conn.execute('''
@@ -25,15 +35,17 @@ def init_db():
             updated_at TEXT NOT NULL DEFAULT (datetime('now'))
         )
     ''')
-    conn.commit()
+    _migrate(conn)
     conn.close()
 
 
-def create_task(user_id, prompt, url, path_files=None):
+def create_task(user_id, prompt, url, path_files=None, page_url=None, parent_id=None):
     conn = get_db()
     cur = conn.execute(
-        'INSERT INTO ai_instant_task (user_id, prompt, url, path_files, status) VALUES (?, ?, ?, ?, ?)',
-        (user_id, prompt, url, path_files, 'task accepted')
+        'INSERT INTO ai_instant_task (user_id, prompt, url, path_files, page_url, parent_id, status) '
+        'VALUES (?, ?, ?, ?, ?, ?, ?)',
+        (user_id, prompt, url, path_files, page_url or url,
+         int(parent_id) if parent_id else None, 'task accepted')
     )
     task_id = cur.lastrowid
     conn.commit()
@@ -41,7 +53,7 @@ def create_task(user_id, prompt, url, path_files=None):
     return task_id
 
 
-def get_tasks(user_id=None, status=None, limit=50):
+def get_tasks(user_id=None, status=None, page_url=None, limit=50):
     conn = get_db()
     query = 'SELECT * FROM ai_instant_task WHERE 1=1'
     params = []
@@ -51,6 +63,9 @@ def get_tasks(user_id=None, status=None, limit=50):
     if status:
         query += ' AND status = ?'
         params.append(status)
+    if page_url:
+        query += ' AND page_url = ?'
+        params.append(page_url)
     query += ' ORDER BY created_at DESC LIMIT ?'
     params.append(limit)
     rows = conn.execute(query, params).fetchall()
@@ -61,8 +76,17 @@ def get_tasks(user_id=None, status=None, limit=50):
 def get_task(task_id):
     conn = get_db()
     row = conn.execute('SELECT * FROM ai_instant_task WHERE id = ?', (task_id,)).fetchone()
+    if not row:
+        conn.close()
+        return None
+    task = dict(row)
+    replies = conn.execute(
+        'SELECT * FROM ai_instant_task WHERE parent_id = ? ORDER BY created_at ASC',
+        (task_id,)
+    ).fetchall()
+    task['replies'] = [dict(r) for r in replies]
     conn.close()
-    return dict(row) if row else None
+    return task
 
 
 def update_task_status(task_id, status):
@@ -79,13 +103,19 @@ def update_task_status(task_id, status):
     conn.close()
 
 
-def count_tasks(user_id=None):
+def count_tasks(user_id=None, page_url=None):
     conn = get_db()
     query = 'SELECT status, COUNT(*) as cnt FROM ai_instant_task'
+    wheres = []
     params = []
     if user_id:
-        query += ' WHERE user_id = ?'
+        wheres.append('user_id = ?')
         params.append(user_id)
+    if page_url:
+        wheres.append('page_url = ?')
+        params.append(page_url)
+    if wheres:
+        query += ' WHERE ' + ' AND '.join(wheres)
     query += ' GROUP BY status'
     rows = conn.execute(query, params).fetchall()
     conn.close()

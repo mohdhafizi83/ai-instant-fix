@@ -34,16 +34,28 @@ python app.py  # runs on http://0.0.0.0:5555
 
 ### 2. Inject Widget
 
-Add to any page:
+Add to any page (the widget injects its own styles — no CSS file needed):
 
 ```html
-<script src="http://your-server:5555/static/ai-instant-fix.js"
-  data-aif-api="http://your-server:5555"
+<script src="http://your-server:5556/widget/ai-instant-fix.js"
+  data-aif-api="http://your-server:5556"
   data-aif-user-id="admin@example.com">
 </script>
 ```
 
-Or copy `widget/ai-instant-fix.js` + `widget/ai-instant-fix.css` to your project.
+If your server requires auth (`JWT_SECRET` set), log in once and pass the token:
+
+```html
+<script src="http://your-server:5556/widget/ai-instant-fix.js"
+  data-aif-api="http://your-server:5556"
+  data-aif-user-id="admin"
+  data-aif-token="***">
+</script>
+```
+
+> Serve the widget file from your AI Fix server (Flask can serve `widget/`
+> via a static route) or any CDN/static host. See `clients/vanilla/index.html`
+> for a copy-paste example including dynamic (SPA-friendly) loading.
 
 ### 3. WordPress
 
@@ -55,6 +67,41 @@ Widget auto-injects for administrator users.
 
 Configure `EXECUTOR_CMD` (or a worker queue) so the server has something
 to dispatch tasks to — see "Choosing an AI Executor" below.
+
+## Frontend Variants (Non-WordPress)
+
+The widget is a zero-dependency vanilla JS singleton — it works on **any**
+website. Ready-made integration files for popular stacks live in `clients/`:
+
+| Stack | File | Pattern |
+|---|---|---|
+| Plain HTML / Shopify / Wix / Webflow | `clients/vanilla/index.html` | One `<script>` tag, or `loadAiInstantFix()` for SPAs |
+| React / Next.js | `clients/react/AiInstantFix.jsx` | `<AiInstantFix api=... />` component + `useAiInstantFix()` headless hook |
+| Vue 3 / Nuxt | `clients/vue/AiInstantFix.vue` | SFC wrapper component |
+| Laravel | `clients/laravel/AiInstantFixController.php` | Same-origin server-side proxy (keeps AI Fix URL + token off the browser) |
+| Express / Node | `clients/express/ai-fix-router.js` | `app.use('/ai-fix', aiFixRouter())` proxy |
+
+Two integration patterns:
+
+1. **Direct** (vanilla/React/Vue): the browser talks straight to the AI Fix
+   server. Set `AIF_ALLOWED_ORIGIN` on the server to your site's origin.
+   Token (if any) is visible in the page — fine for low-risk internal use;
+   for anything sensitive use pattern 2.
+
+2. **Proxy** (Laravel/Express): the browser talks to YOUR backend
+   same-origin; your backend forwards to the AI Fix server with the token.
+   The AI Fix server never appears in client-side code, and you can enforce
+   your own auth (e.g. `auth()->id()`) before forwarding.
+
+All variants use the same canonical REST contract:
+
+```
+POST /api/tasks   {user_id, prompt, url, page_url, parent_id?}  -> {task_id, status}
+GET  /api/tasks   ?page_url=...&user_id=...&status=...&limit=50 -> {tasks, counts}
+GET  /api/tasks/:id                                             -> {task, replies}
+POST /api/auth/login {password}                                 -> {token}
+```
+
 
 ## Architecture
 
@@ -87,15 +134,20 @@ ai-instant-fix/
 ├── README.md
 ├── GUIDE.md
 ├── widget/
-│   ├── ai-instant-fix.js     # Vanilla JS (~180 lines, zero deps)
-│   └── ai-instant-fix.css    # Styles (~120 lines)
+│   └── ai-instant-fix.js     # Universal widget (vanilla JS, self-styling)
+├── clients/                  # Non-WordPress integration variants
+│   ├── vanilla/index.html    # Plain HTML / Shopify / Wix / Webflow
+│   ├── react/AiInstantFix.jsx    # React component + headless hook
+│   ├── vue/AiInstantFix.vue      # Vue 3 SFC wrapper
+│   ├── laravel/AiInstantFixController.php  # Same-origin proxy
+│   └── express/ai-fix-router.js          # Same-origin proxy
 ├── server/
-│   ├── app.py                # Flask API (~120 lines)
-│   ├── db.py                 # SQLite helper (~70 lines)
-│   ├── requirements.txt      # flask, flask-cors, requests
+│   ├── app.py                # Flask API (REST + JWT + rate limiting)
+│   ├── db.py                 # SQLite helper
+│   ├── requirements.txt      # flask, flask-cors, pyjwt, requests
 │   └── schema.sql            # Reference DDL
 └── wp-plugin/
-    ├── ai-instant-fix.php    # WordPress plugin (~80 lines)
+    ├── ai-instant-fix.php    # WordPress plugin
     └── widget/
         ├── ai-instant-fix.js
         └── ai-instant-fix.css

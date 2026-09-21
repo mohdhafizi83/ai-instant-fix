@@ -15,7 +15,13 @@ import time
 import requests as http_requests
 
 app = Flask(__name__)
-CORS(app)
+# CORS: restrict to your front-end origin(s) via env (comma-separated).
+# Falls back to '*' only when unset (local development).
+_allowed_origins = [o.strip() for o in os.environ.get('AIF_ALLOWED_ORIGIN', '').split(',') if o.strip()]
+if _allowed_origins:
+    CORS(app, resources={r'/api/*': {'origins': _allowed_origins}})
+else:
+    CORS(app)  # dev default — set AIF_ALLOWED_ORIGIN in production
 
 
 # ── Simple in-memory rate limiter (per-IP, sliding window) ──
@@ -438,7 +444,8 @@ def spawn_executor(task_id, user_id, prompt, url, path_files=None):
 
 # ── Shared task processing (used by ALL task entry points) ──
 
-def _process_task_request(user_id, prompt, url, path_files=None, remote_id=None):
+def _process_task_request(user_id, prompt, url, path_files=None, remote_id=None,
+                         page_url=None, parent_id=None):
     """Core task processing: pre-filter → DB → sync → notify → spawn.
     
     This is the SINGLE processing path for all task entry points.
@@ -451,7 +458,8 @@ def _process_task_request(user_id, prompt, url, path_files=None, remote_id=None)
     is_safe, block_reason, suggested_status = prefilter_task(prompt, url)
     if not is_safe:
         print(f'[AIF] PRE-FILTER BLOCKED: {block_reason} | prompt={prompt[:80]}', flush=True)
-        task_id = db.create_task(user_id, prompt, url, path_files)
+        task_id = db.create_task(user_id, prompt, url, path_files,
+                                page_url=page_url, parent_id=parent_id)
         db.update_task_status(task_id, suggested_status)
         notify_telegram(
             f"\U0001F6D1 *AI Fix #{task_id} BLOCKED*\n"
@@ -467,7 +475,8 @@ def _process_task_request(user_id, prompt, url, path_files=None, remote_id=None)
             'reason': block_reason,
         }, 201
 
-    task_id = db.create_task(user_id, prompt, url, path_files)
+    task_id = db.create_task(user_id, prompt, url, path_files,
+                            page_url=page_url, parent_id=parent_id)
 
     # Sync to Power Tool DB for tracking
     sync_to_power_tool(prompt, url, status='processing')
@@ -504,8 +513,11 @@ def create():
     prompt    = (data.get('prompt') or '').strip()
     url       = (data.get('url') or '').strip()
     path_files = data.get('path_files')
+    page_url  = (data.get('page_url') or url).strip()
+    parent_id = data.get('parent_id')
 
-    result, code = _process_task_request(user_id, prompt, url, path_files)
+    result, code = _process_task_request(user_id, prompt, url, path_files,
+                                        page_url=page_url, parent_id=parent_id)
     return jsonify(result), code
 
 
@@ -516,12 +528,13 @@ def create():
 def list_tasks():
     user_id = request.args.get('user_id')
     status  = request.args.get('status')
+    page_url = request.args.get('page_url')
     try:
         limit = min(int(request.args.get('limit', 50)), 200)
     except ValueError:
         return jsonify({'error': 'invalid limit'}), 400
-    tasks   = db.get_tasks(user_id=user_id, status=status, limit=limit)
-    counts  = db.count_tasks(user_id=user_id)
+    tasks   = db.get_tasks(user_id=user_id, status=status, page_url=page_url, limit=limit)
+    counts  = db.count_tasks(user_id=user_id, page_url=page_url)
     return jsonify({'tasks': tasks, 'counts': counts})
 
 
@@ -658,6 +671,20 @@ def login():
 @app.route('/health', methods=['GET'])
 def health():
     return jsonify({'status': 'ok'})
+
+
+# ── Serve the universal widget (so frontends can load it from here) ──
+_WIDGET_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'widget'))
+
+@app.route('/widget/<path:filename>', methods=['GET'])
+def serve_widget(filename):
+    # Whitelist: only the widget JS/CSS, nothing else.
+    if filename not in ('ai-instant-fix.js', 'ai-instant-fix.css'):
+        return jsonify({'error': 'not found'}), 404
+    from flask import send_from_directory
+    return send_from_directory(_WIDGET_DIR, filename,
+                              mimetype='application/javascript' if filename.endswith('.js') else 'text/css',
+                              max_age=3600)
 
 
 # ── PATH C (webhook): PHP plugin → direct trigger ─────

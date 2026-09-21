@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>AI Instant Fix — Vanilla JS Example</title>
+</head>
+<body>
+  <h1>Your Website</h1>
+  <p>Any content. The widget floats bottom-right.</p>
+
+  <!--
+    ONE-LINE INTEGRATION — works on ANY website:
+    plain HTML, Shopify, Wix, Squarespace, Webflow, Blogger, ...
+
+    Replace https://fix.example.com with your AI Instant Fix server.
+    For authenticated servers, get a token from POST /api/auth/login
+    and add data-aif-token="...".
+  -->
+  <script src="https://fix.example.com/widget/ai-instant-fix.js"
+          data-aif-api="https://fix.example.com"
+          data-aif-user-id="guest"
+          data-aif-theme="#247b70"></script>
+
+  <!--
+    Alternative: dynamic loading (SPA-friendly, React/Vue/jQuery era).
+    Call loadAiInstantFix() whenever you want the widget to appear.
+  -->
+  <script>
+    function loadAiInstantFix(opts) {
+      var s = document.createElement('script');
+      s.src = (opts.api || '') + '/widget/ai-instant-fix.js';
+      s.dataset.aifApi = opts.api;
+      s.dataset.aifUserId = opts.userId || 'anonymous';
+      if (opts.token) s.dataset.aifToken = opts.token;
+      if (opts.theme) s.dataset.aifTheme = opts.theme;
+      document.body.appendChild(s);
+    }
+    // Example: loadAiInstantFix({ api: 'https://fix.example.com', userId: 'guest' });
+  </script>
+</body>
+</html>
