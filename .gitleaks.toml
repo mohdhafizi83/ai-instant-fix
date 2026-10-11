@@ -1,0 +1,14 @@
+# Gitleaks config — AI Instant Fix
+#
+# server/tests/** contains deliberately fake credentials (JWT/webhook
+# fixtures like "test-secret-0123..."). They are test fixtures, not secrets.
+title = "AI Instant Fix gitleaks config"
+
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Fake credentials in pytest fixtures"
+paths = [
+  '''server/tests/.*'''
+]
