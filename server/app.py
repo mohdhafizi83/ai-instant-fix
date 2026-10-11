@@ -8,13 +8,18 @@ AI Instant Fix — API Server v2.0
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 import db
+import logging  # noqa: F401 - werkzeug logger configured via app.logger
 import os
-import subprocess
+import subprocess  # nosec B404  # operator-set EXECUTOR_CMD template only
 import shlex
+import tempfile
 import time
 import requests as http_requests
 
 app = Flask(__name__)
+
+# Reject request bodies larger than 1 MB (413 on oversize).
+app.config['MAX_CONTENT_LENGTH'] = 1 * 1024 * 1024
 # CORS: restrict to your front-end origin(s) via env (comma-separated).
 # Falls back to '*' only when unset (local development).
 _allowed_origins = [o.strip() for o in os.environ.get('AIF_ALLOWED_ORIGIN', '').split(',') if o.strip()]
@@ -47,15 +52,19 @@ def rate_limit(limit, window_sec):
 
 # ── Webhook signature verification (HMAC-SHA256 over raw body) ──
 def verify_webhook_signature():
-    """Return True if WEBHOOK_SECRET is unset (dev mode) or signature is valid."""
-    if not WEBHOOK_SECRET:
+    """Return True only if WEBHOOK_SECRET is configured and signature is valid.
+
+    Fails closed when WEBHOOK_SECRET is unset (webhook disabled).
+    """
+    secret = os.environ.get('WEBHOOK_SECRET', '')
+    if not secret:
         return False  # fail closed: webhook disabled unless secret configured
     import hmac, hashlib
     signature = request.headers.get('X-AIF-Signature', '')
     if not signature:
         return False
     raw = request.get_data()
-    expected = hmac.new(WEBHOOK_SECRET.encode(), raw, hashlib.sha256).hexdigest()
+    expected = hmac.new(secret.encode(), raw, hashlib.sha256).hexdigest()
     return hmac.compare_digest(signature, expected)
 
 # ── Config (env vars) ─────────────────────────────────
@@ -126,7 +135,7 @@ def resolve_client_by_domain(url):
                         if client_domain.startswith('www.'):
                             client_domain = client_domain[4:]
                     except Exception:
-                        pass
+                        app.logger.debug('domain parse failed for %s', website)
                 
                 # Match by domain
                 if client_domain and client_domain == domain:
@@ -222,17 +231,37 @@ def sync_to_power_tool(prompt, url, status='pending', client_id=None):
 def _jwt_decode(token):
     """Decode JWT or raise. Returns payload dict."""
     import jwt
-    return jwt.decode(token, JWT_SECRET, algorithms=['HS256'])
+    return jwt.decode(token, os.environ.get('JWT_SECRET', ''), algorithms=['HS256'])
+
+
+def _auth_configured():
+    """True when JWT_SECRET is set. Read at call time so tests/env changes apply."""
+    return bool(os.environ.get('JWT_SECRET'))
+
+
+def _anon_allowed():
+    """True only when DEV_ALLOW_ANON=1 is explicitly set (dev-only escape hatch).
+
+    Without JWT_SECRET configured, protected routes FAIL CLOSED (401) unless
+    this flag is set. Never enable DEV_ALLOW_ANON in production.
+    """
+    return os.environ.get('DEV_ALLOW_ANON', '') == '1'
 
 
 def jwt_required(f):
-    """Decorator: require valid JWT Bearer token when JWT_SECRET is set."""
+    """Decorator: require a valid JWT Bearer token.
+
+    Fail-closed: if JWT_SECRET is unset, protected routes return 401 unless
+    DEV_ALLOW_ANON=1 explicitly opts into unauthenticated local development.
+    """
     from functools import wraps
 
     @wraps(f)
     def decorated(*args, **kwargs):
-        if not JWT_SECRET:
-            return f(*args, **kwargs)  # auth disabled
+        if not _auth_configured():
+            if not _anon_allowed():
+                return jsonify({'error': 'authentication not configured'}), 401
+            return f(*args, **kwargs)  # dev-only: explicit DEV_ALLOW_ANON=1 opt-in
         auth = request.headers.get('Authorization', '')
         if not auth.startswith('Bearer '):
             return jsonify({'error': 'Missing or invalid Authorization header'}), 401
@@ -250,16 +279,73 @@ def _auth_allows_mutation():
 
     The AI executor (running on this host) and the PHP plugin both report
     task status back. Either a valid Bearer JWT or a valid X-AIF-Signature
-    over the raw request body is accepted.
+    over the raw request body is accepted. Fails closed when neither
+    JWT_SECRET nor WEBHOOK_SECRET is configured (DEV_ALLOW_ANON=1 aside).
     """
+    if not _auth_configured():
+        if _anon_allowed():
+            return True  # dev-only escape hatch: anon opted in
+        # No JWT secret configured: only a valid webhook signature can mutate.
+        return verify_webhook_signature()
     auth = request.headers.get('Authorization', '')
-    if JWT_SECRET and auth.startswith('Bearer '):
+    if _auth_configured() and auth.startswith('Bearer '):
         try:
             _jwt_decode(auth.split(' ', 1)[1])
             return True
         except Exception:
-            pass
+            app.logger.debug('JWT validation failed; falling back to webhook signature check')
     return verify_webhook_signature()
+
+
+# ── Security headers (applied to every response) ─────
+
+# API/HTML responses: script/style loading is impossible by design (JSON only).
+_CSP_API = "default-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+# /widget/* serves same-origin JS/CSS files, so 'self' is required there.
+# frame-ancestors stays 'none' everywhere: nothing may embed these responses.
+_CSP_WIDGET = "default-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'"
+
+
+@app.after_request
+def _security_headers(resp):
+    resp.headers['X-Content-Type-Options'] = 'nosniff'
+    resp.headers['X-Frame-Options'] = 'DENY'
+    resp.headers['Referrer-Policy'] = 'no-referrer'
+    if request.path.startswith('/widget/'):
+        resp.headers['Content-Security-Policy'] = _CSP_WIDGET
+    else:
+        resp.headers['Content-Security-Policy'] = _CSP_API
+    if request.path.startswith('/api/'):
+        resp.headers['Cache-Control'] = 'no-store'
+    return resp
+
+
+# ── Error hygiene: never leak tracebacks / exception text ──
+
+@app.errorhandler(404)
+def _handle_404(e):
+    return jsonify({'error': 'not found'}), 404
+
+
+@app.errorhandler(405)
+def _handle_405(e):
+    return jsonify({'error': 'method not allowed'}), 405
+
+
+@app.errorhandler(413)
+def _handle_413(e):
+    return jsonify({'error': 'request entity too large'}), 413
+
+
+@app.errorhandler(Exception)
+def _handle_unhandled(e):
+    # Log full traceback server-side; client sees a generic JSON error only.
+    from werkzeug.exceptions import HTTPException
+    if isinstance(e, HTTPException):
+        return e  # 404/405/413 handled above; other HTTP errors keep their code
+    app.logger.exception('Unhandled exception while processing %s %s',
+                         request.method, request.path)
+    return jsonify({'error': 'internal server error'}), 500
 
 
 # ── Telegram notification ─────────────────────────────
@@ -386,7 +472,7 @@ def spawn_executor(task_id, user_id, prompt, url, path_files=None):
 
     if EXECUTOR_CMD:
         # Mode 1: local CLI executor via shell template.
-        import subprocess, tempfile
+        import subprocess, tempfile  # nosec B404
         fd, prompt_file = tempfile.mkstemp(prefix=f"aif-{task_id}-", suffix=".txt")
         with os.fdopen(fd, "w") as f:
             f.write(task_prompt)
@@ -399,10 +485,10 @@ def spawn_executor(task_id, user_id, prompt, url, path_files=None):
             os.unlink(prompt_file)
             print(f"[AIF] Invalid EXECUTOR_CMD template ({e})", flush=True)
             return False
-        print(f"[AIF] Executing task #{task_id} via EXECUTOR_CMD (profile={EXECUTOR_PROFILE})", flush=True)
+        print(f'[AIF] Executing task #{task_id} via EXECUTOR_CMD (profile={EXECUTOR_PROFILE})', flush=True)
         try:
             subprocess.Popen(
-                cmd, shell=True,
+                cmd, shell=True,  # nosec B602  # EXECUTOR_CMD is operator-set, never user input
                 stdout=open(os.devnull, "w"), stderr=subprocess.STDOUT,
                 env={**os.environ, "AIF_TASK_ID": str(task_id)},
             )
@@ -617,20 +703,22 @@ def _notify_and_sync(task_id, status, task):
 def _sync_to_wordpress(task_id, status):
     """Sync task status to WordPress DB via subprocess curl."""
     wp_url = PHP_API_URL.replace('/wp-content/plugins/ai-instant-fix/api.php', '')
+    sync_log = os.environ.get('AIF_SYNC_LOG', os.path.join(tempfile.gettempdir(), 'aif-sync.log'))
     try:
-        import subprocess as sp
+        import subprocess as sp  # nosec B404
         import json
-        result = sp.run([
+        result = sp.run([  # nosec B603 B607  # fixed argv, no shell
             'curl', '-s', '-X', 'POST',
             f'{wp_url}?aif_action=update&id={task_id}',
             '-H', 'Content-Type: application/json',
             '-d', json.dumps({'status': status}),
             '--max-time', '10',
         ], capture_output=True, text=True, timeout=15)
-        with open('/tmp/aif-sync.log', 'a') as f:
+        with open(sync_log, 'a') as f:
             f.write(f'[AIF] Sync #{task_id} ({status}): {result.stdout.strip()[:100]}\n')
     except Exception as e:
-        with open('/tmp/aif-sync.log', 'a') as f:
+        app.logger.warning('WordPress sync failed for task %s: %s', task_id, e)
+        with open(sync_log, 'a') as f:
             f.write(f'[AIF] Sync #{task_id} ({status}) FAILED: {e}\n')
 
 
@@ -640,7 +728,7 @@ def settings():
     return jsonify({
         'api_url':        API_URL,
         'executor_profile': EXECUTOR_PROFILE,
-        'auth_required':  bool(JWT_SECRET),
+        'auth_required':  _auth_configured(),
     })
 
 
@@ -650,7 +738,8 @@ def settings():
 def login():
     """Simple password-based token issue. Set ADMIN_PASSWORD env var."""
     admin_pw = os.environ.get('ADMIN_PASSWORD', '')
-    if not admin_pw or not JWT_SECRET:
+    jwt_secret = os.environ.get('JWT_SECRET', '')
+    if not admin_pw or not jwt_secret:
         return jsonify({'error': 'Auth not configured'}), 501
 
     data = request.get_json(force=True)
@@ -661,7 +750,7 @@ def login():
     import jwt as _jwt
     token = _jwt.encode(
         {'sub': 'admin', 'iat': int(time.time())},
-        JWT_SECRET,
+        jwt_secret,
         algorithm='HS256',
     )
     return jsonify({'token': token})
@@ -750,8 +839,8 @@ def poll_tasks():
                     conn.commit()
                     conn.close()
                     db.update_task_status(int(tid), suggested_status)
-                except:
-                    pass
+                except Exception:
+                    app.logger.debug('local DB insert for blocked task %s skipped', tid)
                 # Notify Telegram — task blocked
                 notify_telegram(
                     f"\U0001F6D1 *AI Fix #{tid} BLOCKED*\n"
@@ -778,8 +867,8 @@ def poll_tasks():
                 conn.commit()
                 conn.close()
                 db.update_task_status(int(tid), 'task on going')
-            except:
-                pass  # may already exist
+            except Exception:
+                app.logger.debug('local DB insert for task %s skipped (may already exist)', tid)
             # Notify Telegram — task received
             notify_telegram(
                 f"\U0001F4CB *AI Fix #{tid} received*\n"
@@ -804,6 +893,11 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5556))
     print(f'AI Instant Fix API v2.0  http://0.0.0.0:{port}')
     print(f'  Executor       : {EXECUTOR_CMD or "worker queue"} (profile={EXECUTOR_PROFILE})')
-    print(f'  JWT auth       : {"ON" if JWT_SECRET else "OFF"}')
+    print(f'  JWT auth       : {"ON" if JWT_SECRET else "OFF (routes fail closed with 401)"}')
+    if _anon_allowed():
+        print('=' * 64)
+        print('*** DEV_ALLOW_ANON=1 ACTIVE: JWT-protected routes accept ***')
+        print('*** UNAUTHENTICATED requests. DEV ONLY — never in prod!    ***')
+        print('=' * 64)
     print(f'  Telegram notify: {"ON" if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID else "OFF"}')
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port, debug=False)  # nosec B104  # front with a reverse proxy
