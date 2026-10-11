@@ -13,10 +13,23 @@ $BACKEND = getenv('AIF_BACKEND') ?: 'http://localhost:5556';
 
 // ── Headers ────────────────────────────────────────
 header('Content-Type: application/json; charset=utf-8');
-header('Access-Control-Allow-Origin: *');
+// Restrict CORS to your site(s) via env; '*' only for local development.
+$aif_origin = getenv('AIF_ALLOWED_ORIGIN') ?: '';
+if ($aif_origin) {
+    header('Access-Control-Allow-Origin: ' . $aif_origin);
+} else {
+    header('Access-Control-Allow-Origin: *'); // dev default — set AIF_ALLOWED_ORIGIN in production
+}
 header('Access-Control-Allow-Methods: GET, POST, PUT, OPTIONS');
 header('Access-Control-Allow-Headers: Content-Type, Authorization');
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') { http_response_code(204); exit; }
+
+// ── Body size cap (mirror the Flask server's 1 MB limit) ──
+if (isset($_SERVER['CONTENT_LENGTH']) && intval($_SERVER['CONTENT_LENGTH']) > 1048576) {
+    http_response_code(413);
+    echo json_encode(['error' => 'request entity too large']);
+    exit;
+}
 
 // ── Route mapping ──────────────────────────────────
 // Map query param actions to backend paths
@@ -32,7 +45,8 @@ $routes = [
 
 if (!isset($routes[$action])) {
     http_response_code(400);
-    echo json_encode(['error' => 'Unknown action: ' . $action . '. Valid: health, create, list, get, update']);
+    // Do not echo the user-supplied action back (reflected-content hygiene).
+    echo json_encode(['error' => 'Unknown action. Valid: health, create, list, get, update']);
     exit;
 }
 

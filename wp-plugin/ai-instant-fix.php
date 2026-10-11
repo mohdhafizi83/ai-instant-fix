@@ -21,8 +21,9 @@ function fizi_aif_widget() {
     $css = esc_url(plugins_url('widget/ai-instant-fix.css', __FILE__) . "?v=$v");
 
     echo "\n<!-- Fizi AI Fix v7 -->\n";
-    echo "<link rel='stylesheet' href='$css'>\n";
-    echo "<script src='$js' data-aif-api='$api' data-aif-user-id='$uid'></script>\n";
+    echo '<link rel="stylesheet" href="' . esc_url($css) . "\">\n";
+    echo '<script src="' . esc_url($js) . '" data-aif-api="' . esc_attr($api)
+       . '" data-aif-user-id="' . esc_attr($uid) . '"></script>\n';
 }
 
 // ── API handler ────────────────────────────────────
@@ -32,8 +33,26 @@ function fizi_aif_api() {
     $a = $_GET['aif_action'] ?? '';
     if (!in_array($a, ['health','create','list','get','update'])) return;
 
+    // Basic per-IP rate limit (60 req/min) via transients — mirrors api.php.
+    $ip_raw   = isset($_SERVER['REMOTE_ADDR']) ? preg_replace('/[^0-9a-fA-F.:]/', '', $_SERVER['REMOTE_ADDR']) : 'unknown';
+    $rl_key   = 'aif_rl_' . md5($ip_raw);
+    $rl_hits  = (int) get_transient($rl_key);
+    if ($rl_hits >= 60) {
+        header('Content-Type: application/json; charset=utf-8');
+        http_response_code(429);
+        echo json_encode(['error' => 'rate limit exceeded']);
+        exit;
+    }
+    set_transient($rl_key, $rl_hits + 1, 60);
+
     header('Content-Type: application/json; charset=utf-8');
-    header('Access-Control-Allow-Origin: *');
+    // Restrict CORS to your site(s) via env; '*' only for local development.
+    $aif_origin = getenv('AIF_ALLOWED_ORIGIN') ?: '';
+    if ($aif_origin) {
+        header('Access-Control-Allow-Origin: ' . $aif_origin);
+    } else {
+        header('Access-Control-Allow-Origin: *'); // dev default — set AIF_ALLOWED_ORIGIN in production
+    }
 
     global $wpdb;
     $t = $wpdb->prefix . 'ai_instant_task';
@@ -173,10 +192,13 @@ function aif_forward_to_executor($task_id, $uid, $prompt, $url, $path_files = nu
 // ── Admin menu ─────────────────────────────────────
 add_action('admin_menu', function() {
     add_menu_page('Fizi AI Fix', 'Fizi AI Fix', 'manage_options', 'fizi-aif', function() {
+        if (!current_user_can('manage_options')) {
+            wp_die('Insufficient permissions');
+        }
         $api = home_url('/');
         echo '<div class="wrap"><h1>Fizi AI Instant Fix</h1>';
         echo '<p>Widget auto-injects for administrators and editors on the frontend.</p>';
-        echo "<p>API endpoint: <code>{$api}?aif_action=</code></p>";
+        echo '<p>API endpoint: <code>' . esc_html($api) . '?aif_action=</code></p>';
         echo '<hr><p><b>Status:</b> task accepted | task on going | task completed | task rejected</p>';
         echo '<p><b>Safety:</b> dangerous_stop | complex_send | prompt_ask</p>';
         echo '</div>';
