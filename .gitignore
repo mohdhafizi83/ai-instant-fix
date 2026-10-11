@@ -1,12 +1,14 @@
 # Junk & secrets
 venv/
 .venv/
+.venv-hard/
 __pycache__/
 *.pyc
 *.log
 *.backup*
 .env
 .env.*
+!.env.example
 node_modules/
 tasks.db
 *.db
