@@ -296,16 +296,35 @@ The webhook hop is a local HTTP call — instant, no timer, no polling lag.
 
 ## Security
 
-This project is hardened for public/production use:
+This project is hardened for public/production use (see [SECURITY.md](SECURITY.md) for the full threat model):
 
-- **JWT authentication** — all task endpoints require a Bearer token when `JWT_SECRET` is set
+- **JWT authentication, fail-closed** — task endpoints require a Bearer token; when `JWT_SECRET` is unset they return **401** (no open dev mode). Local dev without auth requires the explicit `DEV_ALLOW_ANON=1` escape hatch, which prints a loud startup warning.
 - **Webhook HMAC signatures** — PHP→executor calls are signed with `X-AIF-Signature` (SHA-256 HMAC over the raw body); the webhook fails closed if no secret is configured
+- **Security headers** — CSP (`frame-ancestors 'none'`), `X-Frame-Options: DENY`, `X-Content-Type-Options: nosniff`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store` on `/api/*`
+- **Body size cap** — requests over 1 MB are rejected with 413
 - **Rate limiting** — per-IP sliding windows on every endpoint (login: 5/5min, create: 30/min, reads: 120/min)
 - **Constant-time comparisons** — `hmac.compare_digest` / `hash_equals` for all secret checks
 - **Pre-filter guard** — destructive prompts (SQL DROP/TRUNCATE, `rm -rf`, fork bombs) are blocked before reaching the agent
 - **No secrets in code** — everything via environment variables (see `.env.example`)
-- **No error leakage** — internal exception details are logged server-side, never returned to clients
+- **No error leakage** — generic JSON errors; tracebacks logged server-side only; tokens/signatures never logged
 - **Prepared statements** — all SQL uses bound parameters (MySQLi / PDO / sqlite3)
+- **CI** — pytest, bandit, pip-audit, gitleaks on every push (`.github/workflows/ci.yml`)
 
-> ⚠️ Always set `JWT_SECRET` and `WEBHOOK_SECRET` in production.
-> Without `JWT_SECRET`, endpoints run in open dev mode — do not expose them publicly.
+### Reject paths (curl examples)
+
+```bash
+# 401 — JWT-protected route with no auth (fail-closed, JWT_SECRET unset or token missing)
+curl -i http://localhost:5556/api/tasks
+# HTTP/1.1 401 UNAUTHORIZED  {"error":"authentication not configured"}
+
+# 401 — webhook with a bad signature
+curl -i -X POST http://localhost:5556/api/webhook/task \
+  -H 'Content-Type: application/json' -H 'X-AIF-Signature: deadbeef' \
+  -d '{"prompt":"x","url":"https://example.com"}'
+# HTTP/1.1 401 UNAUTHORIZED  {"error":"invalid or missing webhook signature"}
+
+# 413 — body over the 1 MB cap
+curl -i -X POST http://localhost:5556/api/tasks \
+  -H 'Content-Type: application/json' --data-binary @2mb.json
+# HTTP/1.1 413 REQUEST ENTITY TOO LARGE  {"error":"request entity too large"}
+```
