@@ -1,4 +1,6 @@
 # AI Instant Fix 🔧
+[![CI](https://github.com/mohdhafizi83/ai-instant-fix/actions/workflows/ci.yml/badge.svg)](https://github.com/mohdhafizi83/ai-instant-fix/actions/workflows/ci.yml)
+
 
 Browser widget for submitting AI-powered instant fixes. Write what you want changed on any webpage — an AI agent executes it autonomously.
 
