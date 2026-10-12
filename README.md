@@ -2,6 +2,12 @@
 
 Browser widget for submitting AI-powered instant fixes. Write what you want changed on any webpage — an AI agent executes it autonomously.
 
+![widget demo](docs/assets/widget-demo.gif)
+
+*Open widget → describe the fix in plain language → task is accepted and
+dispatched to the configured AI executor. (Local demo: server in dev-anon
+mode, mock shop page.)*
+
 ## How It Works
 
 1. **Admin clicks widget** on any webpage → types a fix request (e.g. "Change the Save button to blue")
